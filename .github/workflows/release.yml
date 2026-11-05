@@ -1,0 +1,68 @@
+name: Release binaries
+
+# Builds qd-save-report for Linux and Windows and attaches the archives to the
+# release that triggered the run.
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.os.name }}
+    runs-on: ${{ matrix.os.os }}
+    strategy:
+      matrix:
+        os:
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            exe: qd-save-report.exe
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-musl # static binary, runs on any distro
+            exe: qd-save-report
+    permissions:
+      packages: write
+      contents: write
+    env:
+      TARGET: ${{ matrix.os.target }}
+      EXE: ${{ matrix.os.exe }}
+      ASSET_NAME: ${{ matrix.os.name }}
+      TAG: ${{ github.event.release.tag_name }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: qd-save-report
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustup target add "$TARGET"
+
+      - name: Build
+        run: cargo build --release --locked --target "$TARGET"
+
+      - name: Package
+        id: package
+        run: |
+          stage="qd-save-report-$TAG-$ASSET_NAME"
+          mkdir "$stage"
+          cp "target/$TARGET/release/$EXE" README.md "$stage/"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            7z a "$stage.zip" "$stage" > /dev/null
+            echo "asset=$stage.zip" >> "$GITHUB_OUTPUT"
+          else
+            tar czf "$stage.tar.gz" "$stage"
+            echo "asset=$stage.tar.gz" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" "${{ steps.package.outputs.asset }}" --clobber

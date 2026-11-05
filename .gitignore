@@ -1,0 +1,23 @@
+# Rust build output
+target/
+
+# Personal save data (contains your Steam ID); never commit it
+/7656119*/
+*.sav
+Challenges
+Challenges_Backup
+steam_autocloud.vdf
+
+# Generated reports
+/*.html
+
+# Written by the coords mod at runtime
+positions.txt
+CoordsDisplay_positions.txt
+
+# Editor / OS clutter
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
