@@ -1,16 +1,20 @@
 # qd-save-report
 
 Reads a **Queen's Domain** save folder and writes a single self-contained HTML
-report showing:
+report with tabs:
 
-* every Steam achievement, with progress for the unfinished ones
-* exactly what is still missing per achievement: items, Skull Key thresholds,
-  weapons left to upgrade (with level and upgrade-data status), the secret
-  walls that still count, and hints for the special cases (Ending 4,
-  Flying Sword)
-* world coordinates of every uncollected Skull Key, counting secret wall,
-  weapon, throwable, treasure, accessory, upgrade, chest, Orbewa egg and
-  Grimoire ink
+* **Dashboard:** compact progress tiles (achievements, Skull Keys, eggs,
+  weapons, accessories, throwing weapons, meal tickets, hidden doors, play
+  time, level, coins) and the list of achievements still to do.
+* **Achievements:** every unfinished achievement with what is still missing
+  (items, Skull Key thresholds, weapons left to upgrade, endings and hints for
+  the special cases), plus the completed ones.
+* **One tab per collection:** Skull Keys, Orbewa eggs, weapons, accessories,
+  throwing weapons, meal tickets and hidden doors. Each lists *every* entry
+  with its status in your save, the world coordinates, and for items where to
+  get them (world pickup or shop). "Only missing" hides what you already have.
+* **More:** the remaining uncollected treasures, chests, upgrades and Grimoire
+  ink, and the save files that were read.
 
 Nothing is hard-coded from a wiki. The tool reads the game's own data out of
 its `.pak` (challenge definitions, string table, item data, shop stock, and the

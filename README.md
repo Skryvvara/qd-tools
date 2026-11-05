@@ -43,11 +43,18 @@ The report tool only reads files. It never modifies your save or the game.
 
 ## What the report covers
 
-* All Steam achievements, with progress for the unfinished ones.
-* Per achievement, what is still missing: items, Skull Key thresholds, weapons
-  left to upgrade, secret walls, endings, and hints for the special cases.
-* World coordinates of every uncollected Skull Key, secret wall, weapon,
-  throwable, treasure, accessory, upgrade, chest, Orbewa egg and Grimoire ink.
+* **Dashboard:** compact progress tiles (achievements, Skull Keys, eggs,
+  weapons, accessories, throwing weapons, meal tickets, hidden doors, play
+  time, level, coins) and the list of achievements still to do.
+* **Achievements:** every unfinished achievement with what is still missing
+  (items, Skull Key thresholds, weapons left to upgrade, endings and hints for
+  the special cases), plus the completed ones.
+* **One tab per collection:** Skull Keys, Orbewa eggs, weapons, accessories,
+  throwing weapons, meal tickets and hidden doors. Each lists *every* entry
+  with its status in your save, the world coordinates, and for items where to
+  get them (world pickup or shop). "Only missing" hides what you already have.
+* **More:** the remaining uncollected treasures, chests, upgrades and Grimoire
+  ink, and the save files that were read.
 
 The data comes from the game's own `.pak` (challenge definitions, item data,
 shop stock and the actors placed in all world maps), not from a wiki, so it
