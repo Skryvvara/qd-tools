@@ -14,7 +14,7 @@
 local Config = {
     ToggleKey      = Key.F6,
     LogKey         = Key.F7,
-    UpdateMs       = 100,      -- overlay refresh interval
+    UpdateMs       = 200,      -- overlay refresh interval
     PosX           = 24,       -- overlay position in viewport pixels
     PosY           = 140,
     FontSize       = 20,
@@ -23,24 +23,33 @@ local Config = {
     StartVisible   = true,
 }
 
-local UEHelpers = require("UEHelpers")
-
 local Visible = Config.StartVisible
 local Widget = nil
 local TextBlock = nil
 local WidgetFailed = false
+local Pawn = nil
+local LastText = nil
+local Tick = 0
+-- Expensive work (object searches, overlay checks, map lookup) only runs
+-- about once a second; the numbers themselves refresh every UpdateMs.
+local SLOW_EVERY = math.max(1, math.floor(1000 / Config.UpdateMs))
 local LogFile = "ue4ss/Mods/CoordsDisplay/positions.txt"
 
 local function Log(msg)
     print("[CoordsDisplay] " .. msg .. "\n")
 end
 
-local function GetPawn()
-    local ok, pawn = pcall(function() return UEHelpers.GetPlayer() end)
-    if ok and pawn and pawn:IsValid() then return pawn end
-    pawn = FindFirstOf("FS_PlayerChar_C")
-    if pawn and pawn:IsValid() then return pawn end
-    return nil
+-- The pawn is cached. Searching for it (UEHelpers.GetPlayer / FindFirstOf)
+-- scans the whole object array, which is far too slow to do on every update,
+-- so it only happens when the cached pawn went away, at most once per slow tick.
+local function GetPawn(allowSearch)
+    if Pawn and Pawn:IsValid() then return Pawn end
+    Pawn = nil
+    if allowSearch then
+        local p = FindFirstOf("FS_PlayerChar_C")
+        if p and p:IsValid() then Pawn = p end
+    end
+    return Pawn
 end
 
 -- Friendly names, same table as qd-save-report's report.rs
@@ -90,6 +99,17 @@ local function CurrentMap(pawn)
     return LastMap
 end
 
+-- The map line only changes when walking between sublevels, so it is
+-- refreshed on the slow tick and cached in between.
+local MapLine = nil
+local function RefreshMap(pawn)
+    local map = CurrentMap(pawn)
+    if map then
+        local area = AreaName(map)
+        MapLine = map .. (area ~= "" and ("  (" .. area .. ")") or "")
+    end
+end
+
 local function FormatPosition(pawn)
     local loc = pawn:K2_GetActorLocation()
     local s = string.format("X %.0f   Y %.0f   Z %.0f", loc.X, loc.Y, loc.Z)
@@ -97,13 +117,7 @@ local function FormatPosition(pawn)
         local rot = pawn:K2_GetActorRotation()
         s = s .. string.format("   Yaw %.0f", rot.Yaw)
     end
-    if Config.ShowMap then
-        local map = CurrentMap(pawn)
-        if map then
-            local area = AreaName(map)
-            s = s .. "\n" .. map .. (area ~= "" and ("  (" .. area .. ")") or "")
-        end
-    end
+    if Config.ShowMap and MapLine then s = s .. "\n" .. MapLine end
     return s, loc
 end
 
@@ -168,16 +182,27 @@ local function SetOverlayVisible(v)
 end
 
 local function Update()
+    Tick = Tick + 1
+    local slow = (Tick % SLOW_EVERY) == 1 or SLOW_EVERY == 1
     if not Visible then return end
-    local pawn = GetPawn()
+    local pawn = GetPawn(slow)
     if not pawn then return end
-    if not OverlayAlive() then
-        Widget, TextBlock = nil, nil
-        if not CreateOverlay() then return end
-        SetOverlayVisible(Visible)
+    if slow then
+        if not OverlayAlive() then
+            Widget, TextBlock, LastText = nil, nil, nil
+            if not CreateOverlay() then return end
+            SetOverlayVisible(Visible)
+        end
+        RefreshMap(pawn)
     end
-    local text = FormatPosition(pawn)
-    pcall(function() TextBlock:SetText(FText(text)) end)
+    if not TextBlock then return end
+    -- Only touch the widget when the text actually changed: SetText
+    -- invalidates the layout, which isn't free.
+    local ok, text = pcall(FormatPosition, pawn)
+    if ok and text ~= LastText then
+        LastText = text
+        pcall(function() TextBlock:SetText(FText(text)) end)
+    end
 end
 
 LoopAsync(Config.UpdateMs, function()
@@ -189,17 +214,19 @@ RegisterKeyBind(Config.ToggleKey, function()
     ExecuteInGameThread(function()
         Visible = not Visible
         SetOverlayVisible(Visible)
+        Tick = 0 -- next update runs the slow path
         Log(Visible and "overlay on" or "overlay off")
     end)
 end)
 
 RegisterKeyBind(Config.LogKey, function()
     ExecuteInGameThread(function()
-        local pawn = GetPawn()
+        local pawn = GetPawn(true)
         if not pawn then
             Log("no player pawn")
             return
         end
+        RefreshMap(pawn)
         local text = FormatPosition(pawn):gsub("\n", "   ")
         Log(text)
         local f = io.open(LogFile, "a") or io.open("Mods/CoordsDisplay/positions.txt", "a")
