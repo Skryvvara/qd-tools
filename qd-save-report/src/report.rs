@@ -519,6 +519,7 @@ th{font-weight:600;color:var(--muted);font-size:11px;text-transform:uppercase;le
 tr.ok td:first-child{color:var(--ok)}
 tr.miss td:first-child{color:var(--miss)}
 .st{font-weight:600;font-size:12px}
+.tag{display:inline-block;margin-left:6px;padding:0 6px;border:1px solid var(--line);border-radius:999px;font-size:11px;font-weight:400;color:var(--muted);vertical-align:1px}
 .where div{white-space:nowrap}
 .where .xyz{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:var(--muted)}
 .only-missing tr[data-s=ok]{display:none}
@@ -600,7 +601,7 @@ fn tab_head(summary: &str, hint: &str) -> String {
 fn world_tab_table(
     ctx: &Ctx,
     actors: &[&Actor],
-    label: Option<&dyn Fn(&Actor) -> String>,
+    label: Option<&dyn Fn(&Actor) -> String>, // returns HTML (escape it yourself)
     is_ok: &dyn Fn(&Actor) -> Option<bool>,
     state: &dyn Fn(&Actor) -> String,
     extra_head: &str,
@@ -624,7 +625,7 @@ fn world_tab_table(
             format!(
                 "<tr data-s={}><td>{}</td><td>{}</td>{}{}{}</tr>",
                 s,
-                esc(&label.map(|f| f(a)).unwrap_or_else(|| ctx.actor_label(a))),
+                label.map(|f| f(a)).unwrap_or_else(|| esc(&ctx.actor_label(a))),
                 state(a),
                 place_cells(a),
                 loc_cells(a),
@@ -958,7 +959,13 @@ pub fn render(gd: &GameData, sd: &SaveDir) -> String {
         body += &world_tab_table(
             &ctx,
             &all,
-            Some(&|a: &Actor| a.name.clone()),
+            Some(&|a: &Actor| {
+                let mut s = esc(&a.name);
+                if a.no_count {
+                    s += " <span class=tag title=\"Doesn't count towards the All Secret Doors achievement\">not counted</span>";
+                }
+                s
+            }),
             &|a| wall_ok(a),
             &|a| match wall_ok(a) {
                 Some(true) => status(true, "open", ""),
