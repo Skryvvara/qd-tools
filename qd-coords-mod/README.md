@@ -36,8 +36,10 @@ Keys, refresh rate, text size and the gap below the compass are at the top of
 
 ## Install
 
-1. Download a UE4SS release (v3.x, the `UE4SS_v3.x.x.zip`, not the dev zip) and
-   extract it into the game's binaries folder:
+1. Download UE4SS v4.0.0 or newer (`UE4SS_v4.0.0.zip` from the
+   [releases](https://github.com/UE4SS-RE/RE-UE4SS/releases), not the `zDEV`
+   zip) and extract it into the game's binaries folder. UE4SS v3 was reported
+   to crash game version 1.01.06a (#2).
 
    ```
    <Steam>/steamapps/common/QueensDomain/QueensDomain/Binaries/Win64/
@@ -70,9 +72,11 @@ Keys, refresh rate, text size and the gap below the compass are at the top of
 
 ## Troubleshooting
 
-* **No overlay but F7 prints positions:** the widget could not be created on
-  your UE4SS version (look for `[CoordsDisplay]` lines in `UE4SS.log`).
-  Positions still go to the console and to `positions.txt`.
+* **No overlay but F7 prints positions:** look for `[CoordsDisplay]` lines in
+  `ue4ss/UE4SS.log`. `could not show overlay` means the widget could not be put
+  on screen. Set `Debug = true` at the top of `main.lua` and press F7 for
+  details (the widget's world, owner and viewport state). Positions still go to
+  the console and to `positions.txt`.
 * **Nothing at all:** UE4SS isn't loading. Check `UE4SS.log` next to the exe,
   and on Proton check the `WINEDLLOVERRIDES` launch option.
 

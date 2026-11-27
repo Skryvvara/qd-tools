@@ -1,7 +1,8 @@
 --[[
   CoordsDisplay - shows the player's world coordinates on screen in Queen's Domain.
 
-  Requires UE4SS (https://github.com/UE4SS-RE/RE-UE4SS).
+  Requires UE4SS (https://github.com/UE4SS-RE/RE-UE4SS), tested with v4.0.0
+  on game version 1.01.06a (Unreal Engine 4.27).
 
   Keys (change below):
     F6  toggle the overlay
@@ -34,6 +35,13 @@
   Note: font settings can't be changed on a live TextBlock from Lua here
   (SetFont fails on this engine build), so everything is set before the widget
   is put on screen, and the widget is rebuilt when the resolution changes.
+
+  Why the widget needs the right outer (issue #2): a UserWidget can only be put
+  on screen when it can find its world. FindFirstOf("GameInstance") can return
+  a stray plain UGameInstance that has no world; AddToViewport then silently
+  does nothing and IsInViewport() stays false. The widget is therefore created
+  under the game instance of the player's world (FS_GameInstance_C), owned by
+  the player controller, and checked to be on screen after adding it.
 ]]
 
 local Config = {
@@ -46,6 +54,7 @@ local Config = {
     ShowMap        = true,  -- last lines: sublevel code, then area name, e.g. "500_AUT" / "Ancient World"
     StartVisible   = true,
     HideWhenPaused = true,  -- also hide whenever the game is paused (photo mode, ...)
+    Debug          = false, -- log the widget's state on F7 (and once after it is first shown)
     -- Menus that hide the overlay while they are on screen.
     HideInMenus    = {
         "/Game/UI/Menus/GameMenu.GameMenu_C",                    -- inventory / equipment
@@ -65,6 +74,8 @@ local Config = {
     },
 }
 
+local VERSION = "1.1.0"
+
 -- Game HUD layout (FS_PlayerHUD / UIAspectRatioBox), in HUD units.
 local HUD_W, HUD_H = 1920, 1080
 -- Compass slot: 144 x 144, 30 in from the right edge and 30 down from the top.
@@ -80,21 +91,37 @@ local TEXT_COLOR = 0.8             -- light grey
 local SHADOW = 2                   -- drop shadow offset, HUD units
 local PIXELATE = { bPixelate = true, PixelateMultiplier = 0.75, PixelateSharpen = 1.2, PixelateSharpenBias = 0.0 }
 
+local WIDGET_PREFIX = "CoordsDisplayWidget"
+local VIEWPORT_ZORDER = 1000
+
 local SLOW_EVERY = math.max(1, math.floor(1000 / Config.UpdateMs)) -- ~1 s: lookups, layout
+local RETRY_SLOW_TICKS = 10        -- wait ~10 s before retrying a widget that didn't reach the screen
+
+-- Object names must be unique per load. UE4SS v4's FName() adds new names to
+-- the name table (v3 returned NAME_None for unknown names, so the engine made
+-- up a unique name). Re-using a name after a hot reload would make the engine
+-- construct the new widget in place of the old one that is still on screen.
+local SESSION = string.format("%04x%04x", os.time() % 0x10000, math.random(0, 0xFFFF))
 
 local Visible = Config.StartVisible
 local Widget, TextBlock = nil, nil
-local WidgetFailed = false
-local BuiltFor = nil           -- layout key + font state the widget was built for
-local FontLoaded = false
+local WidgetFailed = false     -- creation failed in a way that won't fix itself
+local RetryAt = nil            -- slow tick before which creation isn't retried
+local BuiltKey = nil           -- layout key the widget was built for
+local FontState = "none"       -- Rockwell: "none" (not in memory yet), "set", "failed"
 local Pawn = nil
 local LastText = nil
 local Shown = false            -- whether the overlay is currently on screen
-local Tick = 0
+local Tick, SlowTick = 0, 0
 local Created = 0              -- suffix for unique object names on re-creation
 local LayoutLib, Statics = nil, nil
+local LastLayout = nil
+local AddedVia = nil           -- "viewport" or "player screen"
 local Logged = {}              -- each distinct warning is logged once
 local LogFile = "ue4ss/Mods/CoordsDisplay/positions.txt"
+local StaleCleaned = false
+local TriedLoadFont = false
+local DiagDone = false
 
 local function Log(msg)
     print("[CoordsDisplay] " .. msg .. "\n")
@@ -109,6 +136,11 @@ end
 
 local function Valid(o)
     return o ~= nil and o:IsValid()
+end
+
+local function GetStatics()
+    Statics = Statics or StaticFindObject("/Script/Engine.Default__GameplayStatics")
+    return Statics
 end
 
 -- Cached; only searched again (a full object scan) when the pawn went away,
@@ -224,7 +256,8 @@ local function ViewportLayout(pawn)
         local top = (H - HUD_H * s) / 2
         local u = s / dpi -- one HUD unit in our widget's Slate units
         return {
-            key  = string.format("%d:%d:%.4f", W, H, dpi),
+            key  = string.format("%.0f:%.0f:%.4f", W, H, dpi),
+            W = W, H = H, dpi = dpi,
             x    = (left + COMPASS_CENTER_X * s) / dpi,
             y    = (top + (COMPASS_BOTTOM + Config.GapBelow) * s) / dpi,
             size = math.max(8, math.floor(ITEM_FONT_SIZE * Config.TextScale * u + 0.5)),
@@ -240,15 +273,56 @@ local function ViewportLayout(pawn)
 end
 
 ---------------------------------------------------------------------------
+-- Diagnostics (Config.Debug)
+---------------------------------------------------------------------------
+
+local function Diag(tag)
+    local parts = {}
+    local function add(label, fn)
+        local ok, v = pcall(fn)
+        table.insert(parts, label .. "=" .. (ok and tostring(v) or ("ERR(" .. tostring(v) .. ")")))
+    end
+    local function name(o) return Valid(o) and o:GetFullName() or "none" end
+    add("ver", function() return VERSION end)
+    add("on", function() return Visible end)
+    add("shown", function() return Shown end)
+    add("addedVia", function() return AddedVia end)
+    add("font", function() return FontState end)
+    if LastLayout then
+        add("layout", function()
+            local l = LastLayout
+            return string.format("%.0fx%.0f dpi %.3f at %.1f,%.1f size %d",
+                l.W, l.H, l.dpi, l.x, l.y, l.size)
+        end)
+    end
+    if Valid(Widget) then
+        add("widget", function() return Widget:GetFullName() end)
+        add("world", function() return name(Widget:GetWorld()) end)
+        add("owner", function() return name(Widget:GetOwningPlayer()) end)
+        add("inViewport", function() return Widget:IsInViewport() end)
+        add("visibility", function() return Widget:GetVisibility() end)
+    else
+        add("widget", function() return "none" end)
+    end
+    if Valid(TextBlock) then
+        add("text", function() return "'" .. TextBlock:GetText():ToString():gsub("\n", "/") .. "'" end)
+        add("fontSize", function() return TextBlock.Font.Size end)
+        add("fontObj", function() return name(TextBlock.Font.FontObject) end)
+    end
+    Log("diag[" .. tag .. "] " .. table.concat(parts, " | "))
+end
+
+---------------------------------------------------------------------------
 -- Widget
 ---------------------------------------------------------------------------
 
 -- The Rockwell font is only in memory once the game has loaded its HUD; try
--- to load it ourselves if it isn't there yet.
+-- to load it ourselves (once) if it isn't there yet.
 local function FindFont()
     local f = StaticFindObject(FONT_PATH)
     if Valid(f) then return f end
-    if LoadAsset then
+    if LoadAsset and not TriedLoadFont then
+        TriedLoadFont = true
         pcall(LoadAsset, FONT_PATH)
         f = StaticFindObject(FONT_PATH)
         if Valid(f) then return f end
@@ -278,28 +352,33 @@ local function StyleText(text, layout)
     end)
     if not ok then LogOnce("could not set text shadow: " .. tostring(err)) end
 
-    FontLoaded = false
-    ok, err = pcall(function()
-        local font = text.Font
-        local rockwell = FindFont()
-        if rockwell then
+    ok, err = pcall(function() text.Font.Size = layout.size end)
+    if not ok then LogOnce("could not set font size: " .. tostring(err)) end
+
+    local rockwell = FindFont()
+    if rockwell then
+        ok, err = pcall(function()
+            local font = text.Font
             font.FontObject = rockwell
             font.TypefaceFontName = FName(FONT_TYPEFACE)
-            FontLoaded = true
-        end
-        font.Size = layout.size
-    end)
-    if not ok then LogOnce("could not set font: " .. tostring(err)) end
+        end)
+        FontState = ok and "set" or "failed"
+        if not ok then LogOnce("could not set font: " .. tostring(err)) end
+    else
+        FontState = "none"
+    end
 
     -- The game's pixelated text rendering (custom engine feature).
-    if Config.Pixelate then ok, err = pcall(function()
-        local p = text.Font.PixelateConfig
-        p.bPixelate = PIXELATE.bPixelate
-        p.PixelateMultiplier = PIXELATE.PixelateMultiplier
-        p.PixelateSharpen = PIXELATE.PixelateSharpen
-        p.PixelateSharpenBias = PIXELATE.PixelateSharpenBias
-    end)
-    if not ok then LogOnce("could not enable pixelated text: " .. tostring(err)) end end
+    if Config.Pixelate then
+        ok, err = pcall(function()
+            local p = text.Font.PixelateConfig
+            p.bPixelate = PIXELATE.bPixelate
+            p.PixelateMultiplier = PIXELATE.PixelateMultiplier
+            p.PixelateSharpen = PIXELATE.PixelateSharpen
+            p.PixelateSharpenBias = PIXELATE.PixelateSharpenBias
+        end)
+        if not ok then LogOnce("could not enable pixelated text: " .. tostring(err)) end
+    end
 
     -- Lines centred on each other; the block itself is centred under the
     -- compass by the slot alignment.
@@ -310,19 +389,60 @@ end
 
 local function DestroyOverlay()
     if Valid(Widget) then pcall(function() Widget:RemoveFromParent() end) end
-    Widget, TextBlock, BuiltFor, LastText, Shown = nil, nil, nil, nil, false
+    Widget, TextBlock, BuiltKey, LastText, Shown, AddedVia = nil, nil, nil, nil, false, nil
 end
 
--- UserWidget -> CanvasPanel -> TextBlock, built at runtime (no assets needed).
-local function CreateOverlay(layout)
-    if WidgetFailed then return false end
+-- A hot reload throws away the Lua state but not the widget it put on
+-- screen; take those leftovers off the screen before building a new one.
+local function RemoveStaleWidgets()
+    if StaleCleaned then return end
+    StaleCleaned = true
     local ok, err = pcall(function()
-        local gi = FindFirstOf("GameInstance")
-        if not Valid(gi) then error("no GameInstance yet") end
-        Created = Created + 1
-        local function N(base) return FName(base .. "_" .. Created) end
+        local all = FindAllOf("UserWidget")
+        if not all then return end
+        local n = 0
+        for _, w in ipairs(all) do
+            if Valid(w) then
+                local okn, name = pcall(function() return w:GetFName():ToString() end)
+                if okn and name:sub(1, #WIDGET_PREFIX) == WIDGET_PREFIX then
+                    pcall(function() w:RemoveFromParent() end)
+                    n = n + 1
+                end
+            end
+        end
+        if n > 0 then Log("removed " .. n .. " overlay widget(s) left over from an earlier load") end
+    end)
+    if not ok then LogOnce("cleanup of old widgets failed: " .. tostring(err)) end
+end
 
-        local w = StaticConstructObject(StaticFindObject("/Script/UMG.UserWidget"), gi, N("CoordsDisplayWidget"))
+local function InViewport(w)
+    local ok, inVp = pcall(function() return w:IsInViewport() end)
+    return ok and inVp == true
+end
+
+-- Errors starting with this are "the world isn't ready yet": retried quietly.
+local NOT_READY = "not ready: "
+
+-- UserWidget -> CanvasPanel -> TextBlock, built at runtime (no assets needed).
+local function CreateOverlay(layout, pawn)
+    if WidgetFailed then return false end
+    if RetryAt and SlowTick < RetryAt then return false end
+    RetryAt = nil
+    RemoveStaleWidgets()
+    local w = nil
+    local ok, err = pcall(function()
+        -- The game instance of the player's world (FS_GameInstance_C), not
+        -- FindFirstOf("GameInstance"): see the note at the top.
+        local gi = GetStatics():GetGameInstance(pawn)
+        if not Valid(gi) then error(NOT_READY .. "no game instance") end
+        local pc = pawn.Controller
+        if not Valid(pc) then error(NOT_READY .. "no player controller") end
+
+        Created = Created + 1
+        local function N(base) return FName(base .. "_" .. SESSION .. "_" .. Created) end
+
+        w = StaticConstructObject(StaticFindObject("/Script/UMG.UserWidget"), gi, N(WIDGET_PREFIX))
+        w:SetOwningPlayer(pc)
         w.WidgetTree = StaticConstructObject(StaticFindObject("/Script/UMG.WidgetTree"), w, N("CoordsDisplayTree"))
         local canvas = StaticConstructObject(StaticFindObject("/Script/UMG.CanvasPanel"), w.WidgetTree, N("CoordsDisplayCanvas"))
         w.WidgetTree.RootWidget = canvas
@@ -336,29 +456,51 @@ local function CreateOverlay(layout)
         slot:SetPosition({ X = layout.x, Y = layout.y })
 
         text:SetText(FText(""))
-        w:AddToViewport(1000)
         w:SetVisibility(1) -- Collapsed until the update loop decides
 
+        -- AddToViewport does nothing (no error) when the widget can't find
+        -- its world, so check that it really is on screen.
+        w:AddToViewport(VIEWPORT_ZORDER)
+        if InViewport(w) then
+            AddedVia = "viewport"
+        else
+            w:AddToPlayerScreen(VIEWPORT_ZORDER)
+            if InViewport(w) then AddedVia = "player screen" end
+        end
+        if not AddedVia then
+            local okw, world = pcall(function() return w:GetWorld() end)
+            error("the widget did not reach the screen (world: "
+                .. ((okw and Valid(world)) and world:GetFullName() or "none") .. ")")
+        end
+
         Widget, TextBlock = w, text
-        BuiltFor = layout.key .. (FontLoaded and ":font" or "")
+        BuiltKey = layout.key
         LastText, Shown = nil, false
     end)
     if not ok then
-        -- The GameInstance doesn't exist on the very first frames; retry later.
-        if not tostring(err):find("no GameInstance") then
-            Log("could not create overlay: " .. tostring(err))
-            WidgetFailed = true
+        local msg = tostring(err)
+        if Valid(w) then pcall(function() w:RemoveFromParent() end) end
+        if msg:find(NOT_READY, 1, true) then
+            return false -- the first frames of a level; try again next slow tick
         end
+        if msg:find("did not reach the screen", 1, true) then
+            LogOnce("could not show overlay: " .. msg .. " - retrying every " .. RETRY_SLOW_TICKS .. " s")
+            RetryAt = SlowTick + RETRY_SLOW_TICKS
+            return false
+        end
+        Log("could not create overlay: " .. msg)
+        WidgetFailed = true
         return false
     end
-    Log("overlay created (font size " .. layout.size .. (FontLoaded and ", Rockwell" or ", default font") .. ")")
+    LastLayout = layout
+    Log(string.format("overlay created (%s, font size %d, %s, viewport %.0fx%.0f, dpi %.3f)",
+        AddedVia, layout.size, FontState == "set" and "Rockwell" or ("default font, Rockwell " .. FontState),
+        layout.W, layout.H, layout.dpi))
     return true
 end
 
 local function OverlayAlive()
-    if not Valid(Widget) or not Valid(TextBlock) then return false end
-    local ok, inVp = pcall(function() return Widget:IsInViewport() end)
-    return ok and inVp
+    return Valid(Widget) and Valid(TextBlock) and InViewport(Widget)
 end
 
 -- (Re)build the widget when it is missing, the resolution changed, or the
@@ -367,11 +509,16 @@ local function EnsureOverlay(pawn)
     local layout = ViewportLayout(pawn)
     if not layout then return OverlayAlive() end
     if OverlayAlive() then
-        local wanted = layout.key .. ((FontLoaded or FindFont()) and ":font" or "")
-        if wanted == BuiltFor then return true end
+        local fontNowAvailable = FontState == "none" and FindFont() ~= nil
+        if layout.key == BuiltKey and not fontNowAvailable then return true end
+        Log("rebuilding overlay (" .. (layout.key ~= BuiltKey
+            and ("viewport " .. tostring(BuiltKey) .. " -> " .. layout.key) or "font loaded") .. ")")
+    elseif Widget then
+        -- E.g. the engine removed it because the level was unloaded.
+        Log("overlay left the screen, rebuilding")
     end
     DestroyOverlay()
-    return CreateOverlay(layout)
+    return CreateOverlay(layout, pawn)
 end
 
 ---------------------------------------------------------------------------
@@ -437,10 +584,7 @@ local function HideReason(pawn)
         end
     end
     if Config.HideWhenPaused then
-        local ok, paused = pcall(function()
-            Statics = Statics or StaticFindObject("/Script/Engine.Default__GameplayStatics")
-            return Statics:IsGamePaused(pawn)
-        end)
+        local ok, paused = pcall(function() return GetStatics():IsGamePaused(pawn) end)
         if ok and paused then return "game paused" end
     end
     return nil
@@ -450,7 +594,8 @@ local function SetShown(show, reason)
     if show == Shown or not Valid(Widget) then return end
     Shown = show
     Log(show and "shown" or ("hidden (" .. tostring(reason) .. ")"))
-    pcall(function() Widget:SetVisibility(show and 3 or 1) end) -- HitTestInvisible / Collapsed
+    local ok, err = pcall(function() Widget:SetVisibility(show and 3 or 1) end) -- HitTestInvisible / Collapsed
+    if not ok then LogOnce("could not change visibility: " .. tostring(err)) end
 end
 
 ---------------------------------------------------------------------------
@@ -460,6 +605,7 @@ end
 local function Update()
     Tick = Tick + 1
     local slow = (Tick % SLOW_EVERY) == 1 or SLOW_EVERY == 1
+    if slow then SlowTick = SlowTick + 1 end
     if not Visible then return end
 
     local pawn = GetPawn(slow)
@@ -479,7 +625,12 @@ local function Update()
     local ok, text = pcall(FormatPosition, pawn)
     if ok and text ~= LastText then
         LastText = text
-        pcall(function() TextBlock:SetText(FText(text)) end)
+        local okSet, err = pcall(function() TextBlock:SetText(FText(text)) end)
+        if not okSet then LogOnce("could not set text: " .. tostring(err)) end
+        if Config.Debug and not DiagDone then
+            DiagDone = true
+            Diag("first text")
+        end
     end
 end
 
@@ -509,6 +660,7 @@ RegisterKeyBind(Config.LogKey, function()
         Log(text)
         local _, trace = LookupMap(pawn)
         Log("map lookup: " .. table.concat(trace, " | "))
+        if Config.Debug then Diag("F7") end
         local f = io.open(LogFile, "a") or io.open("Mods/CoordsDisplay/positions.txt", "a")
             or io.open("CoordsDisplay_positions.txt", "a")
         if f then
@@ -518,4 +670,4 @@ RegisterKeyBind(Config.LogKey, function()
     end)
 end)
 
-Log("loaded - F6 toggles the overlay, F7 logs your position")
+Log("loaded v" .. VERSION .. " - F6 toggles the overlay, F7 logs your position")
